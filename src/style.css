@@ -1,0 +1,18 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, 'Segoe UI', 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  background: #0a0c0f;
+  color: #e6e9ed;
+}
+button {
+  font-family: inherit;
+}
