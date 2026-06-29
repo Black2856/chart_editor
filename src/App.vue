@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount } from 'vue';
+import { onMounted, onBeforeUnmount, ref } from 'vue';
 import { useChartsStore } from './stores/charts';
 import { stepMs } from './core/snap';
 import Toolbar from './components/Toolbar.vue';
@@ -8,6 +8,43 @@ import TimingPanel from './components/TimingPanel.vue';
 import DifficultyPanel from './components/DifficultyPanel.vue';
 
 const store = useChartsStore();
+
+// ファイルのドラッグ&ドロップ読み込み (.osu/.txt 譜面・音源)
+const dragActive = ref(false);
+let dragDepth = 0;
+
+function hasFiles(e: DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+}
+
+function onDragEnter(e: DragEvent): void {
+  if (!hasFiles(e)) return;
+  dragDepth++;
+  dragActive.value = true;
+}
+
+function onDragOver(e: DragEvent): void {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); // drop を許可
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+}
+
+function onDragLeave(): void {
+  dragDepth--;
+  if (dragDepth <= 0) {
+    dragDepth = 0;
+    dragActive.value = false;
+  }
+}
+
+async function onDrop(e: DragEvent): Promise<void> {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dragActive.value = false;
+  const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
+  if (files.length) await store.loadFiles(files);
+}
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
@@ -88,7 +125,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 </script>
 
 <template>
-  <div class="app">
+  <div
+    class="app"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
+    <div v-if="dragActive" class="dropzone">
+      <div class="dropmsg">ここにドロップして読み込み<small>譜面 (.osu / .txt) ・ 音源ファイル</small></div>
+    </div>
     <header><strong>譜面エディター</strong></header>
     <Toolbar />
     <div class="body">
@@ -120,6 +166,35 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
   display: flex;
   flex-direction: column;
   height: 100vh;
+  position: relative;
+}
+.dropzone {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 14, 20, 0.72);
+  border: 3px dashed #4cc4ff;
+  pointer-events: none;
+}
+.dropmsg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 20px;
+  color: #e6e9ed;
+  background: #14171c;
+  border: 1px solid #2a313b;
+  border-radius: 10px;
+  padding: 28px 44px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.dropmsg small {
+  font-size: 13px;
+  color: #8a93a0;
 }
 header {
   padding: 6px 12px;

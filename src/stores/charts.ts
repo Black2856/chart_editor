@@ -15,6 +15,11 @@ import {
   pasteNotes,
   translateNotes,
 } from '../core/selection';
+import {
+  normalizeChart,
+  type NormalizeReport,
+  type ResolveAction,
+} from '../core/normalize';
 import { audioEngine } from '../audio/engine';
 
 export type Tool = 'select' | 'tap' | 'long' | 'delete';
@@ -90,6 +95,9 @@ export const useChartsStore = defineStore('charts', () => {
 
   const clipboard = ref<Clipboard | null>(null);
 
+  // 正規化の直近結果 (UI 表示用)
+  const lastNormalize = ref<NormalizeReport | null>(null);
+
   let rafId = 0;
   let playStartTime = 0;
 
@@ -121,6 +129,26 @@ export const useChartsStore = defineStore('charts', () => {
 
   function loadTxtText(text: string, name: string): Panel {
     return addChart(txtToChart(text, name));
+  }
+
+  function isAudioFile(file: File): boolean {
+    if (file.type.startsWith('audio/')) return true;
+    return /\.(mp3|ogg|wav|m4a|flac|aac)$/i.test(file.name);
+  }
+
+  /** 種類混在のファイル群を拡張子/MIME で振り分けて読み込む (input・D&D 共用)。 */
+  async function loadFiles(files: File[]): Promise<void> {
+    for (const file of files) {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.osu')) {
+        loadOsuText(await file.text(), file.name);
+      } else if (lower.endsWith('.txt')) {
+        loadTxtText(await file.text(), file.name);
+      } else if (isAudioFile(file)) {
+        await loadAudioFile(file);
+      }
+      // 未知の種類は無視
+    }
   }
 
   function removePanel(id: string): void {
@@ -222,6 +250,24 @@ export const useChartsStore = defineStore('charts', () => {
       return copy;
     });
     setNotes(panel, notes, newSel);
+  }
+
+  /** 不可能配置(① LN中の単ノーツ / ② 同レーンほぼ同時)を正規化。種別ごとに move/delete。 */
+  function normalizePanel(
+    panel: Panel,
+    opts: { lnOverlap: ResolveAction; duplicate: ResolveAction },
+  ): NormalizeReport {
+    const result = normalizeChart(panel.notes, {
+      lnOverlap: opts.lnOverlap,
+      duplicate: opts.duplicate,
+      keyCount: panel.keyCount,
+    });
+    lastNormalize.value = result.report;
+    if (result.report.moved > 0 || result.report.removed > 0) {
+      pushUndo(panel);
+      setNotes(panel, result.notes, []);
+    }
+    return result.report;
   }
 
   function copySelection(panel: Panel): void {
@@ -442,6 +488,7 @@ export const useChartsStore = defineStore('charts', () => {
     returnOnStop,
     markers,
     clipboard,
+    lastNormalize,
     snapDivisions,
     // getters
     getPanel,
@@ -451,6 +498,7 @@ export const useChartsStore = defineStore('charts', () => {
     addChart,
     loadOsuText,
     loadTxtText,
+    loadFiles,
     removePanel,
     newEmptyChart,
     // edit
@@ -461,6 +509,7 @@ export const useChartsStore = defineStore('charts', () => {
     copySelection,
     pasteAt,
     removeLnFromSelection,
+    normalizePanel,
     undo,
     redo,
     setSelection,

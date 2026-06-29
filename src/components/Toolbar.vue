@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useChartsStore } from '../stores/charts';
+import NormalizeDialog from './NormalizeDialog.vue';
 
 const store = useChartsStore();
 const chartInput = ref<HTMLInputElement | null>(null);
 const audioInput = ref<HTMLInputElement | null>(null);
+const normalizeOpen = ref(false);
 
 const songLength = computed(() => {
   // panels の変化に追従させるため依存を踏む
@@ -27,18 +29,14 @@ const selCount = computed(() => store.activePanel()?.selection.size ?? 0);
 async function onChartFiles(e: Event): Promise<void> {
   const input = e.target as HTMLInputElement;
   if (!input.files) return;
-  for (const file of Array.from(input.files)) {
-    const text = await file.text();
-    if (file.name.toLowerCase().endsWith('.osu')) store.loadOsuText(text, file.name);
-    else store.loadTxtText(text, file.name);
-  }
+  await store.loadFiles(Array.from(input.files));
   input.value = '';
 }
 
 async function onAudioFile(e: Event): Promise<void> {
   const input = e.target as HTMLInputElement;
-  if (!input.files || !input.files[0]) return;
-  await store.loadAudioFile(input.files[0]);
+  if (!input.files) return;
+  await store.loadFiles(Array.from(input.files));
   input.value = '';
 }
 
@@ -107,10 +105,18 @@ function exportActive(format: 'osu' | 'txt'): void {
         <button :class="{ on: store.chartAlign === 'right' }" title="チャートを右寄せ" @click="store.chartAlign = 'right'">右</button>
       </div>
 
-      <div class="group right">
-        <span class="cap">出力 (選択中の譜面)</span>
-        <button @click="exportActive('osu')">.osu</button>
-        <button @click="exportActive('txt')">.txt</button>
+      <div class="rightblock">
+        <div class="group">
+          <span class="cap">正規化</span>
+          <button title="不可能な配置 (LN中の単ノーツ・同レーン重複) を整える" @click="normalizeOpen = true">
+            不可能配置を整える…
+          </button>
+        </div>
+        <div class="group">
+          <span class="cap">出力 (選択中の譜面)</span>
+          <button @click="exportActive('osu')">.osu</button>
+          <button @click="exportActive('txt')">.txt</button>
+        </div>
       </div>
     </div>
 
@@ -166,6 +172,8 @@ function exportActive(format: 'osu' | 'txt'): void {
       />
       <span class="time">{{ (songLength / 1000).toFixed(1) }}s</span>
     </div>
+
+    <NormalizeDialog v-model="normalizeOpen" />
   </div>
 </template>
 
@@ -194,12 +202,16 @@ function exportActive(format: 'osu' | 'txt'): void {
 .group:first-child {
   padding-left: 0;
 }
-.group:last-child,
-.group.right {
+.group:last-child {
   border-right: none;
 }
-.group.right {
+.rightblock {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+.rightblock .group:last-child {
+  border-right: none;
   padding-right: 0;
 }
 .cap {
