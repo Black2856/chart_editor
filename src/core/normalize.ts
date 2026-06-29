@@ -2,9 +2,11 @@ import type { Note } from './types';
 import { compareNotes, isLong, noteEnd, sortNotes } from './types';
 
 // AI生成譜面の「物理的に不可能な配置」を検出・正規化する純粋関数群。
-//   ① ロングノーツ期間中に同レーンの単ノーツ (押しっぱなし中に同キーを叩く=不可能)
-//   ② ほぼ同タイミングで同レーンに複数ノーツ (同一キーの同時押し=不可能)
+//   ① ロングノーツの押下中・終端に重なる同レーンの別ノーツ tap/LN
+//      (押しっぱなし中の打鍵、LN終点と次ノーツ始点の一致/接近なども含む=不可能)
+//   ② ほぼ同じ開始タイミングで同レーンに複数ノーツ (同一キーの同時押し=不可能)
 // 解決方法は問題種別ごとに move(別レーンへ退避)/delete(除去) を選べる。
+// LN 同士の重なりは、開始がほぼ同時なら②、それ以外の重なり(終端接触を含む)なら①に分類される。
 
 export type ResolveAction = 'move' | 'delete';
 
@@ -85,14 +87,14 @@ function classifyProblems(notes: Note[], threshold: number): Map<Note, Reason> {
     }
   }
 
-  // ① 残った LN について、その期間内 (開始<t<終了) の同レーン別ノーツを検出
+  // ① 残った LN の期間中・終端に重なる/接触する後続ノーツを検出 (開始近接は②で処理済み)。
+  //    LN を離す瞬間に同キーを打つ「LN終点と次ノーツ始点の一致/接近」も collides で拾う。
   for (const group of byLane.values()) {
     for (const ln of group) {
       if (!isLong(ln) || problems.has(ln)) continue;
-      const end = noteEnd(ln);
       for (const m of group) {
         if (m === ln || problems.has(m)) continue;
-        if (m.time > ln.time && m.time < end) problems.set(m, 'ln');
+        if (m.time > ln.time && collides(m, ln, threshold)) problems.set(m, 'ln');
       }
     }
   }

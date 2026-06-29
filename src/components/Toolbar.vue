@@ -108,7 +108,7 @@ function exportActive(format: 'osu' | 'txt'): void {
       <div class="rightblock">
         <div class="group">
           <span class="cap">正規化</span>
-          <button title="不可能な配置 (LN中の単ノーツ・同レーン重複) を整える" @click="normalizeOpen = true">
+          <button title="不可能な配置 (LN中のノーツ・同レーン重複) を整える" @click="normalizeOpen = true">
             不可能配置を整える…
           </button>
         </div>

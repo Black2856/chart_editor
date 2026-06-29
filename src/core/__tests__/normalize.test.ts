@@ -18,8 +18,34 @@ describe('detectIssues', () => {
     expect(detectIssues(notes).lnOverlaps).toBe(0);
   });
 
-  it('LN終了ちょうどの同レーン tap は誤検出しない', () => {
-    const notes = [ln(1000, 0, 500), tap(1500, 0)];
+  it('LN期間中に開始がズレて重なる別のLNを①として検出', () => {
+    const notes = [ln(1000, 0, 1000), ln(1500, 0, 500)]; // 1500 が (1000,2000) 内
+    const r = detectIssues(notes);
+    expect(r.lnOverlaps).toBe(1);
+    expect(r.duplicates).toBe(0);
+  });
+
+  it('開始がほぼ同時の LN 同士は②として検出', () => {
+    const notes = [ln(1000, 0, 500), ln(1010, 0, 400)]; // 10ms 差 < 30ms
+    const r = detectIssues(notes);
+    expect(r.duplicates).toBe(1);
+    expect(r.lnOverlaps).toBe(0);
+  });
+
+  it('LN終端に重なる同レーン tap (終点と一致) を①として検出', () => {
+    const notes = [ln(1000, 0, 500), tap(1500, 0)]; // LN 1000..1500 の終点に tap
+    expect(detectIssues(notes).lnOverlaps).toBe(1);
+  });
+
+  it('LN終点と次LN始点が一致する重なりを①として検出', () => {
+    const notes = [ln(1000, 0, 1000), ln(2000, 0, 500)]; // A:1000..2000 の終点に B が開始
+    const r = detectIssues(notes);
+    expect(r.lnOverlaps).toBe(1);
+    expect(r.duplicates).toBe(0);
+  });
+
+  it('LN終端から十分離れた次ノーツは検出しない', () => {
+    const notes = [ln(1000, 0, 500), tap(1600, 0)]; // 終点1500から100ms後
     expect(detectIssues(notes).lnOverlaps).toBe(0);
   });
 

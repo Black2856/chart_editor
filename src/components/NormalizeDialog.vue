@@ -60,8 +60,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 
       <div class="row">
         <div class="label">
-          <span class="num">①</span> ロングノーツ中の単ノーツ
-          <small>LN を押している間に同じレーンへ置かれた単ノーツ</small>
+          <span class="num">①</span> ロングノーツに重なるノーツ
+          <small>LN の押下中・終端に同レーンで重なる別ノーツ (LN終点と次の始点の一致を含む)</small>
         </div>
         <div class="seg">
           <button :class="{ on: lnOverlap === 'move' }" @click="lnOverlap = 'move'">別レーンへ移動</button>
@@ -72,7 +72,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
       <div class="row">
         <div class="label">
           <span class="num">②</span> 同レーンの重複
-          <small>ほぼ同じタイミングで同レーンに重なるノーツ</small>
+          <small>ほぼ同じ開始タイミングで同レーンに重なるノーツ</small>
         </div>
         <div class="seg">
           <button :class="{ on: duplicate === 'move' }" @click="duplicate = 'move'">別レーンへ移動</button>
