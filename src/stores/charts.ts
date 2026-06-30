@@ -11,9 +11,10 @@ import { chartId } from '../core/hash';
 import { SNAP_DIVISIONS } from '../core/snap';
 import {
   type Clipboard,
+  type Edge,
   copyNotes,
   pasteNotes,
-  translateNotes,
+  translateNotesWithEdges,
 } from '../core/selection';
 import {
   normalizeChart,
@@ -35,6 +36,7 @@ export interface Panel {
   meta?: ChartMeta;
   difficulty: DifficultyResult;
   selection: Set<Note>; // markRaw
+  edges: Map<Note, Edge>; // markRaw: LN 端単位の選択 ('both' は省略)
   selectionVersion: number; // 選択変化の通知
   rev: number; // ノーツ変化の通知 (canvas 再描画)
   undoStack: Note[][];
@@ -61,6 +63,7 @@ function makePanel(chart: Chart): Panel {
     meta: chart.meta,
     difficulty: chart.difficulty ?? analyzeChart(notes),
     selection: markRaw(new Set<Note>()),
+    edges: markRaw(new Map<Note, Edge>()),
     selectionVersion: 0,
     rev: 0,
     undoStack: markRaw([] as Note[][]),
@@ -188,10 +191,16 @@ export const useChartsStore = defineStore('charts', () => {
     panel.redoStack.length = 0;
   }
 
-  function setNotes(panel: Panel, notes: Note[], newSelection?: Note[]): void {
+  function setNotes(
+    panel: Panel,
+    notes: Note[],
+    newSelection?: Note[],
+    newEdges?: Map<Note, Edge>,
+  ): void {
     sortNotes(notes);
     panel.notes = markRaw(notes);
     panel.selection = markRaw(new Set(newSelection ?? []));
+    panel.edges = markRaw(newEdges ?? new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
@@ -225,10 +234,16 @@ export const useChartsStore = defineStore('charts', () => {
     if (panel.selection.size === 0) return;
     pushUndo(panel);
     const sel = panel.selection;
-    const moved = translateNotes([...sel], dt, dl, panel.keyCount);
+    const selNotes = [...sel];
+    const moved = translateNotesWithEdges(selNotes, panel.edges, dt, dl, panel.keyCount);
+    // 端選択 (head/tail) を移動後の新ノーツへ引き継ぐ → 連続編集が可能
+    const newEdges = new Map<Note, Edge>();
+    selNotes.forEach((orig, i) => {
+      const e = panel.edges.get(orig);
+      if (e && e !== 'both') newEdges.set(moved[i], e);
+    });
     const kept = panel.notes.filter((n) => !sel.has(n)).map((n) => ({ ...n }));
-    const all = [...kept, ...moved];
-    setNotes(panel, all, moved);
+    setNotes(panel, [...kept, ...moved], moved, newEdges);
   }
 
   /** 選択中のロングノーツを Tap 化 (LN除去)。 */
@@ -289,6 +304,7 @@ export const useChartsStore = defineStore('charts', () => {
     panel.redoStack.push(cloneNotes(panel.notes));
     panel.notes = markRaw(prev);
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
@@ -300,20 +316,23 @@ export const useChartsStore = defineStore('charts', () => {
     panel.undoStack.push(cloneNotes(panel.notes));
     panel.notes = markRaw(next);
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
   }
 
   // ---- 選択 ----
-  function setSelection(panel: Panel, notes: Note[]): void {
+  function setSelection(panel: Panel, notes: Note[], edges?: Map<Note, Edge>): void {
     panel.selection = markRaw(new Set(notes));
+    panel.edges = markRaw(edges ?? new Map<Note, Edge>());
     panel.selectionVersion++;
   }
 
   function clearSelection(panel: Panel): void {
     if (panel.selection.size === 0) return;
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
   }
 
