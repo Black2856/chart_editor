@@ -4,10 +4,37 @@ import type { Panel } from '../stores/charts';
 import { useChartsStore } from '../stores/charts';
 import type { Note } from '../core/types';
 import { gridLinesInRange, snapTime } from '../core/snap';
-import { notesInRect } from '../core/selection';
+import { applyEdgeMove, combineEdge, notesInRectWithEdges, type Edge } from '../core/selection';
 
 const props = defineProps<{ panel: Panel }>();
 const store = useChartsStore();
+
+// ヘッダ D&D による並べ替え
+const dragOver = ref(false);
+function onHeadDragStart(e: DragEvent): void {
+  if (!e.dataTransfer) return;
+  e.dataTransfer.setData('text/panel-id', props.panel.id);
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onPanelDragOver(e: DragEvent): void {
+  // パネル並べ替えのドラッグのみ受け付ける (他の D&D は無視)
+  if (!e.dataTransfer || !e.dataTransfer.types.includes('text/panel-id')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  dragOver.value = true;
+}
+function onPanelDragLeave(e: DragEvent): void {
+  // 子要素間の移動では消さない (currentTarget の外に出た時のみ)
+  const ct = e.currentTarget as HTMLElement;
+  if (!ct.contains(e.relatedTarget as Node | null)) dragOver.value = false;
+}
+function onPanelDrop(e: DragEvent): void {
+  dragOver.value = false;
+  const fromId = e.dataTransfer?.getData('text/panel-id');
+  if (!fromId) return;
+  e.preventDefault();
+  store.reorderPanel(fromId, props.panel.id);
+}
 
 const wrapRef = ref<HTMLDivElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -69,8 +96,7 @@ function lowerBound(notes: Note[], time: number): number {
 }
 
 function snapForPanel(time: number, near?: Note[]): number {
-  const div = store.snapDivisions[store.snapIndex];
-  return snapTime(time, props.panel.timing, div.stepBeats, store.noteSnap ? near : undefined, 30);
+  return snapTime(time, props.panel.timing, store.snapStepBeats, store.noteSnap ? near : undefined, 30);
 }
 
 // --- 描画 ---
@@ -106,8 +132,7 @@ function draw(): void {
   const tMax = Math.max(tBottom, tTop);
 
   // グリッド
-  const div = store.snapDivisions[store.snapIndex];
-  const lines = gridLinesInRange(props.panel.timing, div.stepBeats, tMin, tMax);
+  const lines = gridLinesInRange(props.panel.timing, store.snapStepBeats, tMin, tMax);
   for (const ln of lines) {
     const y = timeToY(ln.time, h);
     if (ln.kind === 'measure') {
@@ -141,36 +166,46 @@ function draw(): void {
   const laneColors = ['#4cc4ff', '#ffe14c', '#ff7ab3', '#7affa0', '#c08bff', '#ff9a4c', '#5ad6d6'];
   const vis = visibleNotesSlice(tMin, tMax);
   const sel = props.panel.selection;
+  const edges = props.panel.edges;
   const preview = dragMove.value;
   for (const n of vis) {
-    let lane = n.lane;
-    let t = n.time;
-    if (preview && sel.has(n)) {
-      lane = Math.max(0, Math.min(props.panel.keyCount - 1, lane + preview.dl));
-      t = t + preview.dt;
-    }
+    const selected = sel.has(n);
+    const edge: Edge = n.type === 1 ? edges.get(n) ?? 'both' : 'both';
+    // プレビューは確定移動と同じ applyEdgeMove で算出 (端リサイズも一致)
+    const pn =
+      preview && selected
+        ? applyEdgeMove(n, edge, preview.dt, preview.dl, props.panel.keyCount)
+        : n;
+    const lane = pn.lane;
     const x = laneToX(lane) + PAD;
     const bw = LANE_W - PAD * 2;
     const color = laneColors[lane % laneColors.length];
     if (n.type === 1) {
-      const yStart = timeToY(t, h);
-      const yEnd = timeToY(t + n.dur, h);
+      const yStart = timeToY(pn.time, h);
+      const yEnd = timeToY(pn.time + pn.dur, h);
       c.fillStyle = color + '55';
       c.fillRect(x, yEnd, bw, yStart - yEnd);
       c.fillStyle = color;
       c.fillRect(x, yStart - NOTE_H / 2, bw, NOTE_H);
       c.fillRect(x, yEnd - NOTE_H / 2, bw, NOTE_H);
     } else {
-      const y = timeToY(t, h);
+      const y = timeToY(pn.time, h);
       c.fillStyle = color;
       c.fillRect(x, y - NOTE_H / 2, bw, NOTE_H);
     }
-    if (sel.has(n)) {
+    if (selected) {
       c.strokeStyle = '#ffffff';
       c.lineWidth = 1.6;
-      const yTop = n.type === 1 ? timeToY(t + n.dur, h) - NOTE_H / 2 : timeToY(t, h) - NOTE_H / 2;
-      const hBox = n.type === 1 ? n.dur * store.pxPerMs + NOTE_H : NOTE_H;
-      c.strokeRect(x - 1, yTop, bw + 2, hBox);
+      if (n.type === 1 && edge === 'head') {
+        c.strokeRect(x - 1, timeToY(pn.time, h) - NOTE_H / 2, bw + 2, NOTE_H);
+      } else if (n.type === 1 && edge === 'tail') {
+        c.strokeRect(x - 1, timeToY(pn.time + pn.dur, h) - NOTE_H / 2, bw + 2, NOTE_H);
+      } else if (n.type === 1) {
+        const yTop = timeToY(pn.time + pn.dur, h) - NOTE_H / 2;
+        c.strokeRect(x - 1, yTop, bw + 2, pn.dur * store.pxPerMs + NOTE_H);
+      } else {
+        c.strokeRect(x - 1, timeToY(pn.time, h) - NOTE_H / 2, bw + 2, NOTE_H);
+      }
     }
   }
 
@@ -185,17 +220,18 @@ function draw(): void {
     c.fillRect(x, y2, bw, y1 - y2);
   }
 
-  // 矩形選択
+  // 矩形選択 (始点 y0 は t0 から毎フレーム算出 → スクロールしても始点の時刻が固定)
   if (rubber.value) {
     const r = rubber.value;
+    const y0 = timeToY(r.t0, h);
     c.strokeStyle = '#7fd4ff';
     c.lineWidth = 1;
     c.setLineDash([4, 3]);
     c.strokeRect(
       Math.min(r.x0, r.x1),
-      Math.min(r.y0, r.y1),
+      Math.min(y0, r.y1),
       Math.abs(r.x1 - r.x0),
-      Math.abs(r.y1 - r.y0),
+      Math.abs(r.y1 - y0),
     );
     c.setLineDash([]);
   }
@@ -239,12 +275,16 @@ interface DragMove {
 }
 const dragMove = ref<DragMove | null>(null);
 const longDraft = ref<{ lane: number; start: number; end: number } | null>(null);
-const rubber = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+// 矩形選択: 始点は time(t0) で保持しスクロールに追従させる (始点が時間的にズレない)
+const rubber = ref<{ x0: number; t0: number; x1: number; y1: number } | null>(null);
 
 type Mode = 'none' | 'move' | 'rubber' | 'long';
 let mode: Mode = 'none';
 let downTime = 0;
 let downLane = 0;
+let downNote: Note | null = null; // 移動の基準ノーツ (グリッド吸着のアンカー)
+let downEdge: Edge = 'both'; // 'head'/'tail' なら端リサイズ
+let longSource: Note | null = null; // long ツールで Tap から引き出す時の元ノーツ
 
 function localPos(e: PointerEvent): { x: number; y: number; h: number } {
   const canvas = canvasRef.value!;
@@ -272,7 +312,19 @@ function hitTest(time: number, lane: number, h: number): Note | null {
   return best;
 }
 
+/** LN のどの部分をつかんだか判定 (始点付近=head / 終点付近=tail / それ以外=both)。 */
+function edgeAt(time: number, n: Note): Edge {
+  if (n.type !== 1 || n.dur <= 0) return 'both';
+  const tol = NOTE_H / store.pxPerMs; // px -> ms
+  const headD = Math.abs(time - n.time);
+  const tailD = Math.abs(time - (n.time + n.dur));
+  if (headD <= tol && headD <= tailD) return 'head';
+  if (tailD <= tol) return 'tail';
+  return 'both';
+}
+
 function onPointerDown(e: PointerEvent): void {
+  if (e.button !== 0 && e.button !== 2) return; // 左 / 右ボタンのみ
   const canvas = canvasRef.value!;
   try {
     canvas.setPointerCapture(e.pointerId);
@@ -285,14 +337,8 @@ function onPointerDown(e: PointerEvent): void {
   const lane = Math.max(0, Math.min(props.panel.keyCount - 1, xToLane(x)));
   downLane = lane;
 
-  if (e.button === 2) {
-    // 右クリック: 常に削除
-    const hit = hitTest(rawTime, lane, h);
-    if (hit) store.deleteNotes(props.panel, [hit]);
-    return;
-  }
-
-  const tool = store.tool;
+  // 左=tool / 右=rtool で動作を切り替える
+  const tool = e.button === 2 ? store.rtool : store.tool;
   if (tool === 'tap') {
     const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
     store.addNote(props.panel, { time: Math.max(0, Math.round(t)), lane, type: 0, dur: 0 });
@@ -304,23 +350,40 @@ function onPointerDown(e: PointerEvent): void {
     return;
   }
   if (tool === 'long') {
-    const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
     mode = 'long';
-    downTime = Math.max(0, Math.round(t));
-    longDraft.value = { lane, start: downTime, end: downTime };
+    const hit = hitTest(rawTime, lane, h);
+    if (hit && hit.type === 0) {
+      // 既存の単ノーツを始点に LN を引き出す
+      longSource = hit;
+      downTime = hit.time;
+      longDraft.value = { lane: hit.lane, start: hit.time, end: hit.time };
+    } else {
+      const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
+      longSource = null;
+      downTime = Math.max(0, Math.round(t));
+      longDraft.value = { lane, start: downTime, end: downTime };
+    }
     return;
   }
   // select
   const hit = hitTest(rawTime, lane, h);
   if (hit) {
-    if (!props.panel.selection.has(hit)) store.setSelection(props.panel, [hit]);
+    const edge = edgeAt(rawTime, hit);
+    if (edge !== 'both') {
+      // LN の端をつかんでリサイズ: その端だけを選択
+      store.setSelection(props.panel, [hit], new Map([[hit, edge]]));
+    } else if (!props.panel.selection.has(hit)) {
+      store.setSelection(props.panel, [hit]);
+    }
     mode = 'move';
     downTime = rawTime;
+    downNote = hit;
+    downEdge = edge;
     dragMove.value = { dt: 0, dl: 0 };
   } else {
     if (!e.shiftKey) store.clearSelection(props.panel);
     mode = 'rubber';
-    rubber.value = { x0: x, y0: y, x1: x, y1: y };
+    rubber.value = { x0: x, t0: rawTime, x1: x, y1: y };
   }
 }
 
@@ -333,10 +396,15 @@ function onPointerMove(e: PointerEvent): void {
   if (mode === 'long' && longDraft.value) {
     const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
     longDraft.value = { ...longDraft.value, end: Math.max(0, Math.round(t)) };
-  } else if (mode === 'move') {
-    const targetT = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
-    const anchorSnap = snapForPanel(downTime);
-    dragMove.value = { dt: Math.round(targetT - anchorSnap), dl: lane - downLane };
+  } else if (mode === 'move' && downNote) {
+    // 基準ノーツ(端)自身がグリッドに乗るよう dt を算出 → グリッド外ノーツも整列する
+    const sel = props.panel.selection;
+    const near = visibleNotesSlice(rawTime - 1000, rawTime + 1000).filter((n) => !sel.has(n));
+    const anchorTime = downEdge === 'tail' ? downNote.time + downNote.dur : downNote.time;
+    const target = snapForPanel(anchorTime + (rawTime - downTime), near);
+    const dt = Math.round(target - anchorTime);
+    const dl = downEdge === 'both' ? lane - downLane : 0; // 端リサイズはレーン不変
+    dragMove.value = { dt, dl };
   } else if (mode === 'rubber' && rubber.value) {
     rubber.value = { ...rubber.value, x1: x, y1: y };
   }
@@ -363,14 +431,21 @@ function onPointerUp(e: PointerEvent): void {
 
   if (mode === 'long' && longDraft.value) {
     const d = longDraft.value;
-    const start = Math.min(d.start, d.end);
-    const end = Math.max(d.start, d.end);
-    const dur = end - start;
-    if (dur <= 0) {
-      store.addNote(props.panel, { time: start, lane: d.lane, type: 0, dur: 0 });
+    if (longSource) {
+      // 既存 Tap から LN 化: 前方へドラッグした分だけ伸ばす (後方ドラッグは無効)
+      const dur = d.end - longSource.time;
+      if (dur > 0) store.convertToLong(props.panel, longSource, dur);
     } else {
-      store.addNote(props.panel, { time: start, lane: d.lane, type: 1, dur });
+      const start = Math.min(d.start, d.end);
+      const end = Math.max(d.start, d.end);
+      const dur = end - start;
+      if (dur <= 0) {
+        store.addNote(props.panel, { time: start, lane: d.lane, type: 0, dur: 0 });
+      } else {
+        store.addNote(props.panel, { time: start, lane: d.lane, type: 1, dur });
+      }
     }
+    longSource = null;
     longDraft.value = null;
   } else if (mode === 'move' && dragMove.value) {
     const target = findDropPanel(e.clientX, e.clientY);
@@ -386,17 +461,31 @@ function onPointerUp(e: PointerEvent): void {
       store.moveSelection(props.panel, dm.dt, dm.dl);
     }
     dragMove.value = null;
+    downNote = null;
+    downEdge = 'both';
   } else if (mode === 'rubber' && rubber.value) {
     const r = rubber.value;
-    const t0 = yToTime(r.y0, h);
+    const t0 = r.t0; // 始点は時刻で保持済み
     const t1 = yToTime(r.y1, h);
     const l0 = xToLane(Math.min(r.x0, r.x1));
     const l1 = xToLane(Math.max(r.x0, r.x1));
-    const found = notesInRect(props.panel.notes, { start: t0, end: t1 }, l0, l1);
+    const { notes: found, edges } = notesInRectWithEdges(
+      props.panel.notes,
+      { start: t0, end: t1 },
+      l0,
+      l1,
+    );
     if (e.shiftKey) {
-      store.setSelection(props.panel, [...props.panel.selection, ...found]);
+      const mergedEdges = new Map(props.panel.edges);
+      for (const [n, ed] of edges) {
+        const prev = props.panel.edges.get(n) ?? (props.panel.selection.has(n) ? 'both' : undefined);
+        const combined = prev ? combineEdge(prev, ed) : ed;
+        if (combined === 'both') mergedEdges.delete(n);
+        else mergedEdges.set(n, combined);
+      }
+      store.setSelection(props.panel, [...props.panel.selection, ...found], mergedEdges);
     } else {
-      store.setSelection(props.panel, found);
+      store.setSelection(props.panel, found, edges);
     }
     rubber.value = null;
   }
@@ -439,8 +528,20 @@ watch(
 </script>
 
 <template>
-  <div class="panel" :class="{ active: panel.id === store.activePanelId }">
-    <div class="panel-head">
+  <div
+    class="panel"
+    :class="{ active: panel.id === store.activePanelId, dragover: dragOver }"
+    @dragover="onPanelDragOver"
+    @dragleave="onPanelDragLeave"
+    @drop="onPanelDrop"
+  >
+    <div
+      class="panel-head"
+      :draggable="store.panels.length > 1"
+      title="ドラッグで並べ替え"
+      @dragstart="onHeadDragStart"
+      @dragend="dragOver = false"
+    >
       <span class="pname" :title="panel.name">{{ panel.name }}</span>
       <span class="ptag">{{ panel.format }} · {{ panel.keyCount }}K</span>
       <span class="pstar">★{{ panel.difficulty.star.toFixed(1) }}</span>
@@ -485,6 +586,9 @@ watch(
 .panel.active {
   border-color: #4cc4ff;
 }
+.panel.dragover {
+  border-color: #ffb03a;
+}
 .panel-head {
   display: flex;
   align-items: center;
@@ -492,6 +596,12 @@ watch(
   padding: 4px 6px;
   background: #161a20;
   font-size: 12px;
+}
+.panel-head[draggable='true'] {
+  cursor: grab;
+}
+.panel-head[draggable='true']:active {
+  cursor: grabbing;
 }
 .pname {
   max-width: 110px;

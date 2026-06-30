@@ -46,7 +46,8 @@ npx vitest run -t "rest sections"                      # テスト名で絞る
 
 ### 状態管理（`src/stores/charts.ts`）— 中心
 読み込んだ譜面は `panels`（各 `Panel`）として保持。ビュー状態（`currentTime`/`pxPerMs`/`tool`/`snapIndex`/`chartAlign`）と再生・マーカーもここに集約。**編集系アクション（addNote/deleteNotes/moveSelection/paste/removeLnFromSelection/moveNotesToPanel/undo/redo）はすべてストア経由**。各アクションは「pushUndo → ノーツ書換 → `setNotes`（sort＋難易度再計算＋`rev`/`selectionVersion`更新）」のパターン。
-- **パフォーマンス上の約束**: `Panel.notes` と `selection` は `markRaw`（Vue の deep reactivity を回さない）。Canvas は notes を直接読み、変更通知は `rev` カウンタで行う。難易度・件数など UI 表示はリアクティブ。
+- **パフォーマンス上の約束**: `Panel.notes` と `selection`・`edges` は `markRaw`（Vue の deep reactivity を回さない）。Canvas は notes を直接読み、変更通知は `rev` カウンタで行う。難易度・件数など UI 表示はリアクティブ。
+- **LN 端単位の選択**: `Panel.edges`（`Map<Note,'head'|'tail'>`・未登録は `'both'`）で LN の片端のみ選択を表現。`moveSelection` は `selection.ts` の `applyEdgeMove` で端だけ伸縮（`'both'` は全体移動）。端は EditorPanel で「端をつかむ（`edgeAt`）」か「矩形が片端だけを覆う（`notesInRectWithEdges`）」と確定。
 - Undo はスナップショット方式（`notes` を都度クローン、上限 `UNDO_LIMIT`）。
 - 再生は `src/audio/engine.ts`（Web Audio）。音楽は1トラック共有、SE は `playbackPanelId` の譜面ノーツを lookahead スケジューリング。`currentTime` は rAF で `engine.currentMs()` から更新。
 

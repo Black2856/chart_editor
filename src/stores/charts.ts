@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
-import { markRaw, reactive, ref } from 'vue';
+import { computed, markRaw, reactive, ref } from 'vue';
 import type { Chart, ChartMeta, Note, TimingInfo, DifficultyResult } from '../core/types';
-import { sortNotes } from '../core/types';
+import { sortNotes, noteEnd } from '../core/types';
 import { analyzeChart, emptyResult } from '../core/difficulty/analyze';
 import { osuToChart } from '../core/formats/osu';
 import { txtToChart } from '../core/formats/txt';
@@ -11,15 +11,17 @@ import { chartId } from '../core/hash';
 import { SNAP_DIVISIONS } from '../core/snap';
 import {
   type Clipboard,
+  type Edge,
   copyNotes,
   pasteNotes,
-  translateNotes,
+  translateNotesWithEdges,
 } from '../core/selection';
 import {
   normalizeChart,
   type NormalizeReport,
   type ResolveAction,
 } from '../core/normalize';
+import { randomizeLanes, NEUTRAL_BIAS, type PatternBias } from '../core/randomize';
 import { audioEngine } from '../audio/engine';
 
 export type Tool = 'select' | 'tap' | 'long' | 'delete';
@@ -35,6 +37,7 @@ export interface Panel {
   meta?: ChartMeta;
   difficulty: DifficultyResult;
   selection: Set<Note>; // markRaw
+  edges: Map<Note, Edge>; // markRaw: LN 端単位の選択 ('both' は省略)
   selectionVersion: number; // 選択変化の通知
   rev: number; // ノーツ変化の通知 (canvas 再描画)
   undoStack: Note[][];
@@ -43,9 +46,36 @@ export interface Panel {
 
 let panelCounter = 0;
 const UNDO_LIMIT = 60;
+// この ms 未満の重なりは「同じ位置」とみなす (設置の重複・LN クランプ判定用)
+const OVERLAP_EPS = 1;
 
 function cloneNotes(notes: Note[]): Note[] {
   return notes.map((n) => ({ time: n.time, lane: n.lane, type: n.type, dur: n.dur }));
+}
+
+/** lane 上で [start,end] に重なる既存ノーツがあるか (ignore は判定対象外)。 */
+function laneOverlaps(
+  notes: Note[],
+  lane: number,
+  start: number,
+  end: number,
+  ignore?: Note,
+): boolean {
+  for (const n of notes) {
+    if (n === ignore || n.lane !== lane) continue;
+    if (start < noteEnd(n) + OVERLAP_EPS && n.time < end + OVERLAP_EPS) return true;
+  }
+  return false;
+}
+
+/** lane 上で start より後にある最も近いノーツの開始時刻 (無ければ Infinity)。LN の伸長クランプ用。 */
+function nextNoteStart(notes: Note[], lane: number, start: number, ignore?: Note): number {
+  let best = Infinity;
+  for (const n of notes) {
+    if (n === ignore || n.lane !== lane) continue;
+    if (n.time > start && n.time < best) best = n.time;
+  }
+  return best;
 }
 
 function makePanel(chart: Chart): Panel {
@@ -61,6 +91,7 @@ function makePanel(chart: Chart): Panel {
     meta: chart.meta,
     difficulty: chart.difficulty ?? analyzeChart(notes),
     selection: markRaw(new Set<Note>()),
+    edges: markRaw(new Map<Note, Edge>()),
     selectionVersion: 0,
     rev: 0,
     undoStack: markRaw([] as Note[][]),
@@ -77,8 +108,16 @@ export const useChartsStore = defineStore('charts', () => {
   const pxPerMs = ref(0.35); // ズーム (px/ms)
   const syncScroll = ref(true);
   const tool = ref<Tool>('tap');
+  const rtool = ref<Tool>('delete'); // 右クリック時のツール (既定: 削除)
   const snapIndex = ref(3); // 既定 4分 (0=フリー,1=全,2=2分,3=4分)
+  const snapCustomDiv = ref<number | null>(null); // カスタム「N分」。null=プリセット使用
   const noteSnap = ref(true);
+  // 実効スナップ刻み(stepBeats)。カスタム優先 (N分 = 4/N 拍)。0以下はフリー扱い。
+  const snapStepBeats = computed(() =>
+    snapCustomDiv.value && snapCustomDiv.value > 0
+      ? 4 / snapCustomDiv.value
+      : SNAP_DIVISIONS[snapIndex.value].stepBeats,
+  );
   const chartAlign = ref<'left' | 'center' | 'right'>('center'); // チャート全体の表示位置
 
   // 再生
@@ -94,6 +133,9 @@ export const useChartsStore = defineStore('charts', () => {
   const markers = ref<number[]>([]);
 
   const clipboard = ref<Clipboard | null>(null);
+
+  // ランダム配置のパターンバイアス (UI から調整・セッション内で保持)
+  const randomizeBias = ref<PatternBias>({ ...NEUTRAL_BIAS });
 
   // 正規化の直近結果 (UI 表示用)
   const lastNormalize = ref<NormalizeReport | null>(null);
@@ -159,6 +201,16 @@ export const useChartsStore = defineStore('charts', () => {
     if (playbackPanelId.value === id) playbackPanelId.value = panels.value[0]?.id ?? null;
   }
 
+  /** 横並びの表示順を並べ替える。fromId を toId の位置へ挿入 (ヘッダの D&D 用)。 */
+  function reorderPanel(fromId: string, toId: string): void {
+    if (fromId === toId) return;
+    const from = panels.value.findIndex((p) => p.id === fromId);
+    const to = panels.value.findIndex((p) => p.id === toId);
+    if (from < 0 || to < 0) return;
+    const [moved] = panels.value.splice(from, 1);
+    panels.value.splice(to, 0, moved);
+  }
+
   function newEmptyChart(keyCount = 4): Panel {
     const notes: Note[] = [];
     const chart: Chart = {
@@ -188,25 +240,67 @@ export const useChartsStore = defineStore('charts', () => {
     panel.redoStack.length = 0;
   }
 
-  function setNotes(panel: Panel, notes: Note[], newSelection?: Note[]): void {
+  function setNotes(
+    panel: Panel,
+    notes: Note[],
+    newSelection?: Note[],
+    newEdges?: Map<Note, Edge>,
+  ): void {
     sortNotes(notes);
     panel.notes = markRaw(notes);
     panel.selection = markRaw(new Set(newSelection ?? []));
+    panel.edges = markRaw(newEdges ?? new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
   }
 
-  function addNote(panel: Panel, note: Note): void {
+  /** ノーツを設置。同レーン同位置への重ね置きは拒否 (false)。LN は後続に重ならない長さへクランプ。 */
+  function addNote(panel: Panel, note: Note): boolean {
+    // 始点が既存ノーツに重なるなら設置しない (同じ場所への重複を防ぐ)
+    if (laneOverlaps(panel.notes, note.lane, note.time, note.time)) return false;
+    let dur = note.dur;
+    if (note.type === 1) {
+      // LN は直後のノーツに重ならない長さへクランプ
+      const limit = nextNoteStart(panel.notes, note.lane, note.time);
+      if (limit !== Infinity) {
+        const maxDur = Math.floor(limit - note.time - OVERLAP_EPS);
+        if (maxDur <= 0) return false; // 直後が詰まっていて LN にできない
+        dur = Math.min(dur, maxDur);
+      }
+    }
     pushUndo(panel);
     const notes = cloneNotes(panel.notes);
-    notes.push({ ...note });
+    notes.push({ time: note.time, lane: note.lane, type: note.type, dur });
     sortNotes(notes);
     // 追加したノーツを選択 (参照一致のため新配列から探す)
     const added = notes.find(
       (n) => n.time === note.time && n.lane === note.lane && n.type === note.type,
     );
     setNotes(panel, notes, added ? [added] : []);
+    return true;
+  }
+
+  /** 既存の Tap を LN 化する (long ツールで Tap から引き出す)。dur<=0 や伸長不能なら false。 */
+  function convertToLong(panel: Panel, source: Note, dur: number): boolean {
+    if (source.type !== 0 || dur <= 0 || !panel.notes.includes(source)) return false;
+    // 後続ノーツに重ならない範囲へクランプ
+    const limit = nextNoteStart(panel.notes, source.lane, source.time, source);
+    const finalDur = limit === Infinity ? dur : Math.min(dur, Math.floor(limit - source.time - OVERLAP_EPS));
+    if (finalDur <= 0) return false;
+    pushUndo(panel);
+    let target: Note | null = null;
+    const notes = panel.notes.map((n) => {
+      const copy: Note = { ...n };
+      if (n === source) {
+        copy.type = 1;
+        copy.dur = finalDur;
+        target = copy;
+      }
+      return copy;
+    });
+    setNotes(panel, notes, target ? [target] : []);
+    return true;
   }
 
   function deleteNotes(panel: Panel, targets: Note[]): void {
@@ -225,10 +319,16 @@ export const useChartsStore = defineStore('charts', () => {
     if (panel.selection.size === 0) return;
     pushUndo(panel);
     const sel = panel.selection;
-    const moved = translateNotes([...sel], dt, dl, panel.keyCount);
+    const selNotes = [...sel];
+    const moved = translateNotesWithEdges(selNotes, panel.edges, dt, dl, panel.keyCount);
+    // 端選択 (head/tail) を移動後の新ノーツへ引き継ぐ → 連続編集が可能
+    const newEdges = new Map<Note, Edge>();
+    selNotes.forEach((orig, i) => {
+      const e = panel.edges.get(orig);
+      if (e && e !== 'both') newEdges.set(moved[i], e);
+    });
     const kept = panel.notes.filter((n) => !sel.has(n)).map((n) => ({ ...n }));
-    const all = [...kept, ...moved];
-    setNotes(panel, all, moved);
+    setNotes(panel, [...kept, ...moved], moved, newEdges);
   }
 
   /** 選択中のロングノーツを Tap 化 (LN除去)。 */
@@ -270,6 +370,22 @@ export const useChartsStore = defineStore('charts', () => {
     return result.report;
   }
 
+  /** 既存ノーツのレーンをランダム再配置。選択があれば選択のみ、無ければ全体が対象。 */
+  function randomizePanel(panel: Panel): void {
+    if (panel.notes.length === 0) return;
+    const hasSel = panel.selection.size > 0;
+    const targets = hasSel ? new Set(panel.selection) : new Set(panel.notes);
+    pushUndo(panel);
+    const result = randomizeLanes(panel.notes, targets, {
+      keyCount: panel.keyCount,
+      bias: randomizeBias.value,
+    });
+    // result は入力と同順・同件数。対象だった新ノーツを選択へ引き継ぐ (全体時は選択なし)
+    const newSel: Note[] = [];
+    if (hasSel) panel.notes.forEach((n, i) => { if (targets.has(n)) newSel.push(result[i]); });
+    setNotes(panel, result, newSel);
+  }
+
   function copySelection(panel: Panel): void {
     if (panel.selection.size === 0) return;
     clipboard.value = copyNotes([...panel.selection]);
@@ -289,6 +405,7 @@ export const useChartsStore = defineStore('charts', () => {
     panel.redoStack.push(cloneNotes(panel.notes));
     panel.notes = markRaw(prev);
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
@@ -300,20 +417,23 @@ export const useChartsStore = defineStore('charts', () => {
     panel.undoStack.push(cloneNotes(panel.notes));
     panel.notes = markRaw(next);
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
     recompute(panel);
     bump(panel);
   }
 
   // ---- 選択 ----
-  function setSelection(panel: Panel, notes: Note[]): void {
+  function setSelection(panel: Panel, notes: Note[], edges?: Map<Note, Edge>): void {
     panel.selection = markRaw(new Set(notes));
+    panel.edges = markRaw(edges ?? new Map<Note, Edge>());
     panel.selectionVersion++;
   }
 
   function clearSelection(panel: Panel): void {
     if (panel.selection.size === 0) return;
     panel.selection = markRaw(new Set());
+    panel.edges = markRaw(new Map<Note, Edge>());
     panel.selectionVersion++;
   }
 
@@ -466,6 +586,12 @@ export const useChartsStore = defineStore('charts', () => {
     panel.timing = { ...panel.timing, bpm, offsetMs };
   }
 
+  // 保存(名前を付けて保存)の結果をパネルへ反映。名前と、選んだ拡張子=形式を更新。
+  function renamePanel(panel: Panel, name: string, format?: 'osu' | 'txt'): void {
+    panel.name = name;
+    if (format) panel.format = format;
+  }
+
   const snapDivisions = SNAP_DIVISIONS;
 
   return {
@@ -476,7 +602,10 @@ export const useChartsStore = defineStore('charts', () => {
     pxPerMs,
     syncScroll,
     tool,
+    rtool,
     snapIndex,
+    snapCustomDiv,
+    snapStepBeats,
     noteSnap,
     chartAlign,
     isPlaying,
@@ -489,6 +618,7 @@ export const useChartsStore = defineStore('charts', () => {
     markers,
     clipboard,
     lastNormalize,
+    randomizeBias,
     snapDivisions,
     // getters
     getPanel,
@@ -500,9 +630,11 @@ export const useChartsStore = defineStore('charts', () => {
     loadTxtText,
     loadFiles,
     removePanel,
+    reorderPanel,
     newEmptyChart,
     // edit
     addNote,
+    convertToLong,
     deleteNotes,
     deleteSelection,
     moveSelection,
@@ -510,12 +642,14 @@ export const useChartsStore = defineStore('charts', () => {
     pasteAt,
     removeLnFromSelection,
     normalizePanel,
+    randomizePanel,
     undo,
     redo,
     setSelection,
     clearSelection,
     moveNotesToPanel,
     setTiming,
+    renamePanel,
     // playback
     togglePlay,
     startPlayback,
