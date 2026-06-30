@@ -56,8 +56,7 @@ function isTyping(e: KeyboardEvent): boolean {
 function snapStepMs(): number {
   const p = store.activePanel();
   if (!p) return 100;
-  const div = store.snapDivisions[store.snapIndex];
-  const s = stepMs(p.timing, div.stepBeats);
+  const s = stepMs(p.timing, store.snapStepBeats);
   return s > 0 ? s : 10; // フリー時は 10ms 単位で微調整
 }
 

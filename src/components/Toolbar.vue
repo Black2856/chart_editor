@@ -2,11 +2,13 @@
 import { computed, ref } from 'vue';
 import { useChartsStore } from '../stores/charts';
 import NormalizeDialog from './NormalizeDialog.vue';
+import RandomizeDialog from './RandomizeDialog.vue';
 
 const store = useChartsStore();
 const chartInput = ref<HTMLInputElement | null>(null);
 const audioInput = ref<HTMLInputElement | null>(null);
 const normalizeOpen = ref(false);
+const randomizeOpen = ref(false);
 
 const songLength = computed(() => {
   // panels の変化に追従させるため依存を踏む
@@ -26,6 +28,23 @@ function removeLn(): void {
 
 const selCount = computed(() => store.activePanel()?.selection.size ?? 0);
 
+function randomize(): void {
+  const p = store.activePanel();
+  if (p) store.randomizePanel(p);
+}
+
+// カスタムスナップ「N分」。空/不正は null (=プリセットに戻る)
+const customSnap = computed<number | null>({
+  get: () => store.snapCustomDiv,
+  set: (v) => {
+    store.snapCustomDiv = typeof v === 'number' && isFinite(v) && v > 0 ? v : null;
+  },
+});
+
+function onPresetSnap(): void {
+  store.snapCustomDiv = null; // プリセット選択でカスタム解除
+}
+
 async function onChartFiles(e: Event): Promise<void> {
   const input = e.target as HTMLInputElement;
   if (!input.files) return;
@@ -40,17 +59,50 @@ async function onAudioFile(e: Event): Promise<void> {
   input.value = '';
 }
 
-function exportActive(format: 'osu' | 'txt'): void {
+const OSU_TYPE = { description: 'osu! mania 譜面', accept: { 'text/plain': ['.osu'] } };
+const TXT_TYPE = { description: 'テキスト譜面', accept: { 'text/plain': ['.txt'] } };
+
+// 「名前を付けて保存」。ダイアログの「ファイルの種類」で .osu / .txt を選べ、
+// 選んだ拡張子=形式で書き出す。保存後はその名前・形式をパネルへ反映する。
+// File System Access API 非対応の環境では現在の形式で即ダウンロードに退避。
+async function saveActive(): Promise<void> {
   const panel = store.activePanel();
   if (!panel) return;
+  const base = panel.name.replace(/\.[^.]+$/, '');
+
+  if (typeof window.showSaveFilePicker === 'function') {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${base}.${panel.format}`,
+        // 現在の形式を先頭にして既定選択に合わせる
+        types: panel.format === 'osu' ? [OSU_TYPE, TXT_TYPE] : [TXT_TYPE, OSU_TYPE],
+      });
+      const format: 'osu' | 'txt' = handle.name.toLowerCase().endsWith('.osu') ? 'osu' : 'txt';
+      const text = format === 'osu' ? store.exportOsu(panel) : store.exportTxt(panel);
+      const writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      store.renamePanel(panel, handle.name, format);
+      return;
+    } catch (err) {
+      // ダイアログをキャンセルした場合 (AbortError) は何もしない
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      // それ以外の失敗は下のフォールバックで保存を試みる
+    }
+  }
+
+  // フォールバック: 現在の形式で即ダウンロード
+  const format = panel.format;
+  const name = `${base}.${format}`;
   const text = format === 'osu' ? store.exportOsu(panel) : store.exportTxt(panel);
   const blob = new Blob([text], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${panel.name.replace(/\.[^.]+$/, '')}.${format}`;
+  a.download = name;
   a.click();
   URL.revokeObjectURL(url);
+  store.renamePanel(panel, name, format);
 }
 </script>
 
@@ -82,9 +134,26 @@ function exportActive(format: 'osu' | 'txt'): void {
 
       <div class="group">
         <span class="cap">スナップ</span>
-        <select v-model.number="store.snapIndex">
+        <select
+          v-model.number="store.snapIndex"
+          :class="{ dim: store.snapCustomDiv }"
+          @change="onPresetSnap"
+        >
           <option v-for="(d, i) in store.snapDivisions" :key="i" :value="i">{{ d.label }}</option>
         </select>
+        <input
+          class="snapnum"
+          type="number"
+          min="1"
+          step="1"
+          placeholder="任意"
+          title="カスタム分割: N を入れると N分 (例 4=4分, 16=16分, 12=3連)。空でプリセットに戻る"
+          v-model.number="customSnap"
+        />
+        <span class="mini-lbl">分</span>
+        <button v-if="store.snapCustomDiv" class="xbtn" title="カスタム解除" @click="customSnap = null">
+          ×
+        </button>
         <label class="chk"><input type="checkbox" v-model="store.noteSnap" />吸着</label>
       </div>
 
@@ -113,9 +182,25 @@ function exportActive(format: 'osu' | 'txt'): void {
           </button>
         </div>
         <div class="group">
+          <span class="cap">ランダム配置</span>
+          <button
+            :disabled="!store.activePanel()"
+            :title="
+              selCount > 0
+                ? '選択ノーツのレーンを重なりを避けてランダム再配置'
+                : '譜面全体のレーンを重なりを避けてランダム再配置'
+            "
+            @click="randomize()"
+          >
+            {{ selCount > 0 ? `選択(${selCount})をランダム` : '全体をランダム' }}
+          </button>
+          <button title="ランダム配置の傾向 (ジャック・流れ・和音・均等化) を調整" @click="randomizeOpen = true">
+            設定…
+          </button>
+        </div>
+        <div class="group">
           <span class="cap">出力 (選択中の譜面)</span>
-          <button @click="exportActive('osu')">.osu</button>
-          <button @click="exportActive('txt')">.txt</button>
+          <button :disabled="!store.activePanel()" @click="saveActive()">名前を付けて保存…</button>
         </div>
       </div>
     </div>
@@ -174,6 +259,7 @@ function exportActive(format: 'osu' | 'txt'): void {
     </div>
 
     <NormalizeDialog v-model="normalizeOpen" />
+    <RandomizeDialog v-model="randomizeOpen" />
   </div>
 </template>
 
@@ -276,6 +362,17 @@ input[type='range'] {
 }
 .zoom {
   width: 120px;
+}
+.snapnum {
+  width: 52px;
+  padding: 3px 5px;
+}
+select.dim {
+  opacity: 0.45;
+}
+.xbtn {
+  padding: 2px 6px;
+  line-height: 1;
 }
 .vol {
   width: 68px;

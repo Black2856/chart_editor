@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { markRaw, reactive, ref } from 'vue';
+import { computed, markRaw, reactive, ref } from 'vue';
 import type { Chart, ChartMeta, Note, TimingInfo, DifficultyResult } from '../core/types';
 import { sortNotes } from '../core/types';
 import { analyzeChart, emptyResult } from '../core/difficulty/analyze';
@@ -21,6 +21,7 @@ import {
   type NormalizeReport,
   type ResolveAction,
 } from '../core/normalize';
+import { randomizeLanes, NEUTRAL_BIAS, type PatternBias } from '../core/randomize';
 import { audioEngine } from '../audio/engine';
 
 export type Tool = 'select' | 'tap' | 'long' | 'delete';
@@ -81,7 +82,14 @@ export const useChartsStore = defineStore('charts', () => {
   const syncScroll = ref(true);
   const tool = ref<Tool>('tap');
   const snapIndex = ref(3); // 既定 4分 (0=フリー,1=全,2=2分,3=4分)
+  const snapCustomDiv = ref<number | null>(null); // カスタム「N分」。null=プリセット使用
   const noteSnap = ref(true);
+  // 実効スナップ刻み(stepBeats)。カスタム優先 (N分 = 4/N 拍)。0以下はフリー扱い。
+  const snapStepBeats = computed(() =>
+    snapCustomDiv.value && snapCustomDiv.value > 0
+      ? 4 / snapCustomDiv.value
+      : SNAP_DIVISIONS[snapIndex.value].stepBeats,
+  );
   const chartAlign = ref<'left' | 'center' | 'right'>('center'); // チャート全体の表示位置
 
   // 再生
@@ -97,6 +105,9 @@ export const useChartsStore = defineStore('charts', () => {
   const markers = ref<number[]>([]);
 
   const clipboard = ref<Clipboard | null>(null);
+
+  // ランダム配置のパターンバイアス (UI から調整・セッション内で保持)
+  const randomizeBias = ref<PatternBias>({ ...NEUTRAL_BIAS });
 
   // 正規化の直近結果 (UI 表示用)
   const lastNormalize = ref<NormalizeReport | null>(null);
@@ -283,6 +294,22 @@ export const useChartsStore = defineStore('charts', () => {
       setNotes(panel, result.notes, []);
     }
     return result.report;
+  }
+
+  /** 既存ノーツのレーンをランダム再配置。選択があれば選択のみ、無ければ全体が対象。 */
+  function randomizePanel(panel: Panel): void {
+    if (panel.notes.length === 0) return;
+    const hasSel = panel.selection.size > 0;
+    const targets = hasSel ? new Set(panel.selection) : new Set(panel.notes);
+    pushUndo(panel);
+    const result = randomizeLanes(panel.notes, targets, {
+      keyCount: panel.keyCount,
+      bias: randomizeBias.value,
+    });
+    // result は入力と同順・同件数。対象だった新ノーツを選択へ引き継ぐ (全体時は選択なし)
+    const newSel: Note[] = [];
+    if (hasSel) panel.notes.forEach((n, i) => { if (targets.has(n)) newSel.push(result[i]); });
+    setNotes(panel, result, newSel);
   }
 
   function copySelection(panel: Panel): void {
@@ -485,6 +512,12 @@ export const useChartsStore = defineStore('charts', () => {
     panel.timing = { ...panel.timing, bpm, offsetMs };
   }
 
+  // 保存(名前を付けて保存)の結果をパネルへ反映。名前と、選んだ拡張子=形式を更新。
+  function renamePanel(panel: Panel, name: string, format?: 'osu' | 'txt'): void {
+    panel.name = name;
+    if (format) panel.format = format;
+  }
+
   const snapDivisions = SNAP_DIVISIONS;
 
   return {
@@ -496,6 +529,8 @@ export const useChartsStore = defineStore('charts', () => {
     syncScroll,
     tool,
     snapIndex,
+    snapCustomDiv,
+    snapStepBeats,
     noteSnap,
     chartAlign,
     isPlaying,
@@ -508,6 +543,7 @@ export const useChartsStore = defineStore('charts', () => {
     markers,
     clipboard,
     lastNormalize,
+    randomizeBias,
     snapDivisions,
     // getters
     getPanel,
@@ -529,12 +565,14 @@ export const useChartsStore = defineStore('charts', () => {
     pasteAt,
     removeLnFromSelection,
     normalizePanel,
+    randomizePanel,
     undo,
     redo,
     setSelection,
     clearSelection,
     moveNotesToPanel,
     setTiming,
+    renamePanel,
     // playback
     togglePlay,
     startPlayback,

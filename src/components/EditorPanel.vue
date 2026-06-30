@@ -69,8 +69,7 @@ function lowerBound(notes: Note[], time: number): number {
 }
 
 function snapForPanel(time: number, near?: Note[]): number {
-  const div = store.snapDivisions[store.snapIndex];
-  return snapTime(time, props.panel.timing, div.stepBeats, store.noteSnap ? near : undefined, 30);
+  return snapTime(time, props.panel.timing, store.snapStepBeats, store.noteSnap ? near : undefined, 30);
 }
 
 // --- 描画 ---
@@ -106,8 +105,7 @@ function draw(): void {
   const tMax = Math.max(tBottom, tTop);
 
   // グリッド
-  const div = store.snapDivisions[store.snapIndex];
-  const lines = gridLinesInRange(props.panel.timing, div.stepBeats, tMin, tMax);
+  const lines = gridLinesInRange(props.panel.timing, store.snapStepBeats, tMin, tMax);
   for (const ln of lines) {
     const y = timeToY(ln.time, h);
     if (ln.kind === 'measure') {
