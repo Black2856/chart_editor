@@ -9,6 +9,33 @@ import { applyEdgeMove, combineEdge, notesInRectWithEdges, type Edge } from '../
 const props = defineProps<{ panel: Panel }>();
 const store = useChartsStore();
 
+// ヘッダ D&D による並べ替え
+const dragOver = ref(false);
+function onHeadDragStart(e: DragEvent): void {
+  if (!e.dataTransfer) return;
+  e.dataTransfer.setData('text/panel-id', props.panel.id);
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onPanelDragOver(e: DragEvent): void {
+  // パネル並べ替えのドラッグのみ受け付ける (他の D&D は無視)
+  if (!e.dataTransfer || !e.dataTransfer.types.includes('text/panel-id')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  dragOver.value = true;
+}
+function onPanelDragLeave(e: DragEvent): void {
+  // 子要素間の移動では消さない (currentTarget の外に出た時のみ)
+  const ct = e.currentTarget as HTMLElement;
+  if (!ct.contains(e.relatedTarget as Node | null)) dragOver.value = false;
+}
+function onPanelDrop(e: DragEvent): void {
+  dragOver.value = false;
+  const fromId = e.dataTransfer?.getData('text/panel-id');
+  if (!fromId) return;
+  e.preventDefault();
+  store.reorderPanel(fromId, props.panel.id);
+}
+
 const wrapRef = ref<HTMLDivElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let ctx: CanvasRenderingContext2D | null = null;
@@ -489,8 +516,20 @@ watch(
 </script>
 
 <template>
-  <div class="panel" :class="{ active: panel.id === store.activePanelId }">
-    <div class="panel-head">
+  <div
+    class="panel"
+    :class="{ active: panel.id === store.activePanelId, dragover: dragOver }"
+    @dragover="onPanelDragOver"
+    @dragleave="onPanelDragLeave"
+    @drop="onPanelDrop"
+  >
+    <div
+      class="panel-head"
+      :draggable="store.panels.length > 1"
+      title="ドラッグで並べ替え"
+      @dragstart="onHeadDragStart"
+      @dragend="dragOver = false"
+    >
       <span class="pname" :title="panel.name">{{ panel.name }}</span>
       <span class="ptag">{{ panel.format }} · {{ panel.keyCount }}K</span>
       <span class="pstar">★{{ panel.difficulty.star.toFixed(1) }}</span>
@@ -535,6 +574,9 @@ watch(
 .panel.active {
   border-color: #4cc4ff;
 }
+.panel.dragover {
+  border-color: #ffb03a;
+}
 .panel-head {
   display: flex;
   align-items: center;
@@ -542,6 +584,12 @@ watch(
   padding: 4px 6px;
   background: #161a20;
   font-size: 12px;
+}
+.panel-head[draggable='true'] {
+  cursor: grab;
+}
+.panel-head[draggable='true']:active {
+  cursor: grabbing;
 }
 .pname {
   max-width: 110px;

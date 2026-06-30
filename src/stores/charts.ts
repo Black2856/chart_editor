@@ -173,6 +173,16 @@ export const useChartsStore = defineStore('charts', () => {
     if (playbackPanelId.value === id) playbackPanelId.value = panels.value[0]?.id ?? null;
   }
 
+  /** 横並びの表示順を並べ替える。fromId を toId の位置へ挿入 (ヘッダの D&D 用)。 */
+  function reorderPanel(fromId: string, toId: string): void {
+    if (fromId === toId) return;
+    const from = panels.value.findIndex((p) => p.id === fromId);
+    const to = panels.value.findIndex((p) => p.id === toId);
+    if (from < 0 || to < 0) return;
+    const [moved] = panels.value.splice(from, 1);
+    panels.value.splice(to, 0, moved);
+  }
+
   function newEmptyChart(keyCount = 4): Panel {
     const notes: Note[] = [];
     const chart: Chart = {
@@ -555,6 +565,7 @@ export const useChartsStore = defineStore('charts', () => {
     loadTxtText,
     loadFiles,
     removePanel,
+    reorderPanel,
     newEmptyChart,
     // edit
     addNote,
