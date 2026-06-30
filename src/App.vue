@@ -148,6 +148,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
           <ul>
             <li>ホイール: スクロール / Ctrl+ホイール: ズーム</li>
             <li>Tap/Long ツールでクリック配置 (Longはドラッグ)</li>
+            <li>Longツールで既存Tapからドラッグ → そのTapをLN化</li>
+            <li>同じ位置への重ね置きは自動で防止</li>
+            <li>右クリックのツールはツールバーで変更可 (既定: 削除)</li>
             <li>選択ツール: 矩形選択・ドラッグ移動・別パネルへドロップで移動</li>
             <li>LNの端をドラッグ or 端だけ矩形選択で、その端だけ伸縮</li>
             <li>Space 再生 / Del 削除 / Ctrl+C,V / Ctrl+Z,Y</li>

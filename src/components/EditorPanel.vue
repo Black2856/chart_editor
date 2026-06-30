@@ -284,6 +284,7 @@ let downTime = 0;
 let downLane = 0;
 let downNote: Note | null = null; // 移動の基準ノーツ (グリッド吸着のアンカー)
 let downEdge: Edge = 'both'; // 'head'/'tail' なら端リサイズ
+let longSource: Note | null = null; // long ツールで Tap から引き出す時の元ノーツ
 
 function localPos(e: PointerEvent): { x: number; y: number; h: number } {
   const canvas = canvasRef.value!;
@@ -323,6 +324,7 @@ function edgeAt(time: number, n: Note): Edge {
 }
 
 function onPointerDown(e: PointerEvent): void {
+  if (e.button !== 0 && e.button !== 2) return; // 左 / 右ボタンのみ
   const canvas = canvasRef.value!;
   try {
     canvas.setPointerCapture(e.pointerId);
@@ -335,14 +337,8 @@ function onPointerDown(e: PointerEvent): void {
   const lane = Math.max(0, Math.min(props.panel.keyCount - 1, xToLane(x)));
   downLane = lane;
 
-  if (e.button === 2) {
-    // 右クリック: 常に削除
-    const hit = hitTest(rawTime, lane, h);
-    if (hit) store.deleteNotes(props.panel, [hit]);
-    return;
-  }
-
-  const tool = store.tool;
+  // 左=tool / 右=rtool で動作を切り替える
+  const tool = e.button === 2 ? store.rtool : store.tool;
   if (tool === 'tap') {
     const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
     store.addNote(props.panel, { time: Math.max(0, Math.round(t)), lane, type: 0, dur: 0 });
@@ -354,10 +350,19 @@ function onPointerDown(e: PointerEvent): void {
     return;
   }
   if (tool === 'long') {
-    const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
     mode = 'long';
-    downTime = Math.max(0, Math.round(t));
-    longDraft.value = { lane, start: downTime, end: downTime };
+    const hit = hitTest(rawTime, lane, h);
+    if (hit && hit.type === 0) {
+      // 既存の単ノーツを始点に LN を引き出す
+      longSource = hit;
+      downTime = hit.time;
+      longDraft.value = { lane: hit.lane, start: hit.time, end: hit.time };
+    } else {
+      const t = snapForPanel(rawTime, visibleNotesSlice(rawTime - 1000, rawTime + 1000));
+      longSource = null;
+      downTime = Math.max(0, Math.round(t));
+      longDraft.value = { lane, start: downTime, end: downTime };
+    }
     return;
   }
   // select
@@ -426,14 +431,21 @@ function onPointerUp(e: PointerEvent): void {
 
   if (mode === 'long' && longDraft.value) {
     const d = longDraft.value;
-    const start = Math.min(d.start, d.end);
-    const end = Math.max(d.start, d.end);
-    const dur = end - start;
-    if (dur <= 0) {
-      store.addNote(props.panel, { time: start, lane: d.lane, type: 0, dur: 0 });
+    if (longSource) {
+      // 既存 Tap から LN 化: 前方へドラッグした分だけ伸ばす (後方ドラッグは無効)
+      const dur = d.end - longSource.time;
+      if (dur > 0) store.convertToLong(props.panel, longSource, dur);
     } else {
-      store.addNote(props.panel, { time: start, lane: d.lane, type: 1, dur });
+      const start = Math.min(d.start, d.end);
+      const end = Math.max(d.start, d.end);
+      const dur = end - start;
+      if (dur <= 0) {
+        store.addNote(props.panel, { time: start, lane: d.lane, type: 0, dur: 0 });
+      } else {
+        store.addNote(props.panel, { time: start, lane: d.lane, type: 1, dur });
+      }
     }
+    longSource = null;
     longDraft.value = null;
   } else if (mode === 'move' && dragMove.value) {
     const target = findDropPanel(e.clientX, e.clientY);

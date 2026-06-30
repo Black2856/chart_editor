@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { computed, markRaw, reactive, ref } from 'vue';
 import type { Chart, ChartMeta, Note, TimingInfo, DifficultyResult } from '../core/types';
-import { sortNotes } from '../core/types';
+import { sortNotes, noteEnd } from '../core/types';
 import { analyzeChart, emptyResult } from '../core/difficulty/analyze';
 import { osuToChart } from '../core/formats/osu';
 import { txtToChart } from '../core/formats/txt';
@@ -46,9 +46,36 @@ export interface Panel {
 
 let panelCounter = 0;
 const UNDO_LIMIT = 60;
+// この ms 未満の重なりは「同じ位置」とみなす (設置の重複・LN クランプ判定用)
+const OVERLAP_EPS = 1;
 
 function cloneNotes(notes: Note[]): Note[] {
   return notes.map((n) => ({ time: n.time, lane: n.lane, type: n.type, dur: n.dur }));
+}
+
+/** lane 上で [start,end] に重なる既存ノーツがあるか (ignore は判定対象外)。 */
+function laneOverlaps(
+  notes: Note[],
+  lane: number,
+  start: number,
+  end: number,
+  ignore?: Note,
+): boolean {
+  for (const n of notes) {
+    if (n === ignore || n.lane !== lane) continue;
+    if (start < noteEnd(n) + OVERLAP_EPS && n.time < end + OVERLAP_EPS) return true;
+  }
+  return false;
+}
+
+/** lane 上で start より後にある最も近いノーツの開始時刻 (無ければ Infinity)。LN の伸長クランプ用。 */
+function nextNoteStart(notes: Note[], lane: number, start: number, ignore?: Note): number {
+  let best = Infinity;
+  for (const n of notes) {
+    if (n === ignore || n.lane !== lane) continue;
+    if (n.time > start && n.time < best) best = n.time;
+  }
+  return best;
 }
 
 function makePanel(chart: Chart): Panel {
@@ -81,6 +108,7 @@ export const useChartsStore = defineStore('charts', () => {
   const pxPerMs = ref(0.35); // ズーム (px/ms)
   const syncScroll = ref(true);
   const tool = ref<Tool>('tap');
+  const rtool = ref<Tool>('delete'); // 右クリック時のツール (既定: 削除)
   const snapIndex = ref(3); // 既定 4分 (0=フリー,1=全,2=2分,3=4分)
   const snapCustomDiv = ref<number | null>(null); // カスタム「N分」。null=プリセット使用
   const noteSnap = ref(true);
@@ -227,16 +255,52 @@ export const useChartsStore = defineStore('charts', () => {
     bump(panel);
   }
 
-  function addNote(panel: Panel, note: Note): void {
+  /** ノーツを設置。同レーン同位置への重ね置きは拒否 (false)。LN は後続に重ならない長さへクランプ。 */
+  function addNote(panel: Panel, note: Note): boolean {
+    // 始点が既存ノーツに重なるなら設置しない (同じ場所への重複を防ぐ)
+    if (laneOverlaps(panel.notes, note.lane, note.time, note.time)) return false;
+    let dur = note.dur;
+    if (note.type === 1) {
+      // LN は直後のノーツに重ならない長さへクランプ
+      const limit = nextNoteStart(panel.notes, note.lane, note.time);
+      if (limit !== Infinity) {
+        const maxDur = Math.floor(limit - note.time - OVERLAP_EPS);
+        if (maxDur <= 0) return false; // 直後が詰まっていて LN にできない
+        dur = Math.min(dur, maxDur);
+      }
+    }
     pushUndo(panel);
     const notes = cloneNotes(panel.notes);
-    notes.push({ ...note });
+    notes.push({ time: note.time, lane: note.lane, type: note.type, dur });
     sortNotes(notes);
     // 追加したノーツを選択 (参照一致のため新配列から探す)
     const added = notes.find(
       (n) => n.time === note.time && n.lane === note.lane && n.type === note.type,
     );
     setNotes(panel, notes, added ? [added] : []);
+    return true;
+  }
+
+  /** 既存の Tap を LN 化する (long ツールで Tap から引き出す)。dur<=0 や伸長不能なら false。 */
+  function convertToLong(panel: Panel, source: Note, dur: number): boolean {
+    if (source.type !== 0 || dur <= 0 || !panel.notes.includes(source)) return false;
+    // 後続ノーツに重ならない範囲へクランプ
+    const limit = nextNoteStart(panel.notes, source.lane, source.time, source);
+    const finalDur = limit === Infinity ? dur : Math.min(dur, Math.floor(limit - source.time - OVERLAP_EPS));
+    if (finalDur <= 0) return false;
+    pushUndo(panel);
+    let target: Note | null = null;
+    const notes = panel.notes.map((n) => {
+      const copy: Note = { ...n };
+      if (n === source) {
+        copy.type = 1;
+        copy.dur = finalDur;
+        target = copy;
+      }
+      return copy;
+    });
+    setNotes(panel, notes, target ? [target] : []);
+    return true;
   }
 
   function deleteNotes(panel: Panel, targets: Note[]): void {
@@ -538,6 +602,7 @@ export const useChartsStore = defineStore('charts', () => {
     pxPerMs,
     syncScroll,
     tool,
+    rtool,
     snapIndex,
     snapCustomDiv,
     snapStepBeats,
@@ -569,6 +634,7 @@ export const useChartsStore = defineStore('charts', () => {
     newEmptyChart,
     // edit
     addNote,
+    convertToLong,
     deleteNotes,
     deleteSelection,
     moveSelection,

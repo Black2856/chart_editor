@@ -133,6 +133,16 @@ async function saveActive(): Promise<void> {
       </div>
 
       <div class="group">
+        <span class="cap">右クリック</span>
+        <select v-model="store.rtool" title="右クリック時のツール">
+          <option value="select">選択</option>
+          <option value="tap">Tap</option>
+          <option value="long">Long</option>
+          <option value="delete">削除</option>
+        </select>
+      </div>
+
+      <div class="group">
         <span class="cap">スナップ</span>
         <select
           v-model.number="store.snapIndex"
